@@ -36,6 +36,55 @@ try:
 except ImportError:
     AUTOREFRESH_DISPONIVEL = False
 
+try:
+    from sqlalchemy import create_engine, text
+    SQLALCHEMY_DISPONIVEL = True
+except ImportError:
+    SQLALCHEMY_DISPONIVEL = False
+
+try:
+    from config_banco import DATABASE_URL as DATABASE_URL_LOCAL
+except ImportError:
+    DATABASE_URL_LOCAL = None
+
+
+def obter_database_url():
+    """Procura a conexao com o banco na nuvem: primeiro nos secrets do Streamlit
+    Cloud (quando publicado), senao no arquivo config_banco.py local."""
+    try:
+        return st.secrets["DATABASE_URL"]
+    except Exception:
+        return DATABASE_URL_LOCAL
+
+
+DATABASE_URL = obter_database_url()
+USAR_NUVEM = bool(DATABASE_URL) and SQLALCHEMY_DISPONIVEL
+
+if USAR_NUVEM:
+    _engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+
+    def obter_conexao():
+        """Retorna uma conexao com o banco na nuvem (Postgres), para LEITURA (pandas)."""
+        return _engine.connect()
+
+    def obter_conexao_escrita():
+        """Retorna uma conexao 'crua' (estilo cursor/commit classico), para ESCRITA."""
+        return _engine.raw_connection()
+else:
+    def obter_conexao():
+        raise RuntimeError("Banco na nuvem nao configurado")
+
+    def obter_conexao_escrita():
+        raise RuntimeError("Banco na nuvem nao configurado")
+
+
+def banco_disponivel(caminho_arquivo_local):
+    """Na nuvem, as tabelas sempre 'existem' (podem so estar vazias).
+    Localmente, verifica se o arquivo .db realmente esta na pasta."""
+    if USAR_NUVEM:
+        return True
+    return os.path.exists(caminho_arquivo_local)
+
 BANCO_VENDAS = "namilay.db"
 BANCO_ESTOQUE = "namilay_estoque.db"
 BANCO_DEVOLUCOES = "namilay_devolucoes.db"
@@ -146,32 +195,51 @@ def cartao_metrica(coluna, label, valor_texto, cor_valor=None):
 
 @st.cache_data(ttl=30)
 def carregar_vendas():
-    conexao = sqlite3.connect(BANCO_VENDAS)
-    pedidos = pd.read_sql_query("SELECT * FROM pedidos", conexao)
-    itens = pd.read_sql_query("SELECT * FROM itens_pedido", conexao)
-    conexao.close()
+    if USAR_NUVEM:
+        with obter_conexao() as conexao:
+            pedidos = pd.read_sql_query("SELECT * FROM pedidos", conexao)
+            itens = pd.read_sql_query("SELECT * FROM itens_pedido", conexao)
+    else:
+        conexao = sqlite3.connect(BANCO_VENDAS)
+        pedidos = pd.read_sql_query("SELECT * FROM pedidos", conexao)
+        itens = pd.read_sql_query("SELECT * FROM itens_pedido", conexao)
+        conexao.close()
     return pedidos, itens
 
 
 @st.cache_data(ttl=30)
 def carregar_estoque():
-    conexao = sqlite3.connect(BANCO_ESTOQUE)
-    dados = pd.read_sql_query("SELECT * FROM estoque_snapshot", conexao)
-    conexao.close()
+    if USAR_NUVEM:
+        with obter_conexao() as conexao:
+            dados = pd.read_sql_query("SELECT * FROM estoque_snapshot", conexao)
+    else:
+        conexao = sqlite3.connect(BANCO_ESTOQUE)
+        dados = pd.read_sql_query("SELECT * FROM estoque_snapshot", conexao)
+        conexao.close()
     return dados
 
 
 @st.cache_data(ttl=30)
 def carregar_devolucoes():
-    conexao = sqlite3.connect(BANCO_DEVOLUCOES)
-    devolucoes = pd.read_sql_query("SELECT * FROM devolucoes", conexao)
-    itens_devolucao = pd.read_sql_query("SELECT * FROM itens_devolucao", conexao)
-    conexao.close()
+    if USAR_NUVEM:
+        with obter_conexao() as conexao:
+            devolucoes = pd.read_sql_query("SELECT * FROM devolucoes", conexao)
+            itens_devolucao = pd.read_sql_query("SELECT * FROM itens_devolucao", conexao)
+    else:
+        conexao = sqlite3.connect(BANCO_DEVOLUCOES)
+        devolucoes = pd.read_sql_query("SELECT * FROM devolucoes", conexao)
+        itens_devolucao = pd.read_sql_query("SELECT * FROM itens_devolucao", conexao)
+        conexao.close()
     return devolucoes, itens_devolucao
 
 
 def preparar_banco_envios():
-    """Diferente das outras, essa NAO usa cache -- porque a gente escreve nela."""
+    """Diferente das outras, essa NAO usa cache -- porque a gente escreve nela.
+    Na nuvem, as tabelas ja foram criadas pelo criar_tabelas_supabase.sql, entao
+    so retornamos uma conexao pronta pra usar."""
+    if USAR_NUVEM:
+        return obter_conexao_escrita()
+
     conexao = sqlite3.connect(BANCO_ENVIOS)
     cursor = conexao.cursor()
     cursor.execute("""
@@ -233,7 +301,7 @@ aba_vendas, aba_estoque, aba_devolucao, aba_calendario, aba_inteligencia = st.ta
 # ------------------------- Aba de Vendas -------------------------
 
 with aba_vendas:
-    if not os.path.exists(BANCO_VENDAS):
+    if not banco_disponivel(BANCO_VENDAS):
         st.warning(
             f"O arquivo {BANCO_VENDAS} ainda nao existe nesta pasta. "
             "Rode o sincronizar_tiny.py primeiro."
@@ -381,7 +449,7 @@ with aba_vendas:
         )
 
         # ---- Devolucoes (do banco separado) ----
-        if os.path.exists(BANCO_DEVOLUCOES):
+        if banco_disponivel(BANCO_DEVOLUCOES):
             devolucoes, _ = carregar_devolucoes()
             col_d1, col_d2 = st.columns(2)
             col_d1.metric("Devolucoes (periodo total sincronizado)", f"{len(devolucoes)}")
@@ -528,7 +596,7 @@ with aba_vendas:
 # ------------------------- Aba de Estoque -------------------------
 
 with aba_estoque:
-    if not os.path.exists(BANCO_ESTOQUE):
+    if not banco_disponivel(BANCO_ESTOQUE):
         st.warning(
             f"O arquivo {BANCO_ESTOQUE} ainda nao existe nesta pasta. "
             "Rode o sincronizar_estoque_tiny.py primeiro."
@@ -556,7 +624,7 @@ with aba_estoque:
         # ---- Giro de estoque, dias restantes e previsao de ruptura ----
         st.subheader("Giro de estoque e previsao de ruptura")
 
-        if not os.path.exists(BANCO_VENDAS):
+        if not banco_disponivel(BANCO_VENDAS):
             st.info(
                 f"Para calcular velocidade de venda e dias restantes, preciso tambem do "
                 f"{BANCO_VENDAS}. Rode o sincronizar_tiny.py."
@@ -718,12 +786,12 @@ with aba_estoque:
 # ------------------------- Aba de Devolucao -------------------------
 
 with aba_devolucao:
-    if not os.path.exists(BANCO_DEVOLUCOES):
+    if not banco_disponivel(BANCO_DEVOLUCOES):
         st.warning(
             f"O arquivo {BANCO_DEVOLUCOES} ainda nao existe nesta pasta. "
             "Rode o sincronizar_devolucoes_tiny.py primeiro."
         )
-    elif not os.path.exists(BANCO_VENDAS):
+    elif not banco_disponivel(BANCO_VENDAS):
         st.warning(
             f"Precisamos tambem do {BANCO_VENDAS} (vendas) para calcular o percentual "
             "de devolucao por produto. Rode o sincronizar_tiny.py primeiro."
@@ -850,16 +918,27 @@ with aba_calendario:
 
             if enviar_form:
                 cursor = conexao_envios.cursor()
-                cursor.execute(
-                    "INSERT INTO envios (data_prevista, destino, status, observacao, transferencia_estoque) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (data_envio.strftime("%d/%m/%Y"), destino_envio, status_envio, observacao_envio, transferencia_envio),
-                )
-                envio_id_novo = cursor.lastrowid
+                if USAR_NUVEM:
+                    cursor.execute(
+                        "INSERT INTO envios (data_prevista, destino, status, observacao, transferencia_estoque) "
+                        "VALUES (%s, %s, %s, %s, %s) RETURNING id",
+                        (data_envio.strftime("%d/%m/%Y"), destino_envio, status_envio, observacao_envio, transferencia_envio),
+                    )
+                    envio_id_novo = cursor.fetchone()[0]
+                else:
+                    cursor.execute(
+                        "INSERT INTO envios (data_prevista, destino, status, observacao, transferencia_estoque) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (data_envio.strftime("%d/%m/%Y"), destino_envio, status_envio, observacao_envio, transferencia_envio),
+                    )
+                    envio_id_novo = cursor.lastrowid
+
+                marcador = "%s" if USAR_NUVEM else "?"
                 for _, linha in itens_editados.iterrows():
                     if str(linha.get("sku", "")).strip():
                         cursor.execute(
-                            "INSERT INTO envio_itens (envio_id, sku, descricao, quantidade) VALUES (?, ?, ?, ?)",
+                            f"INSERT INTO envio_itens (envio_id, sku, descricao, quantidade) "
+                            f"VALUES ({marcador}, {marcador}, {marcador}, {marcador})",
                             (envio_id_novo, linha["sku"], linha["descricao"], float(linha["quantidade"] or 0)),
                         )
                 conexao_envios.commit()
@@ -919,7 +998,8 @@ with aba_calendario:
             )
             if col_upd2.button("Salvar status", key=f"botao_status_{envio['id']}"):
                 cursor = conexao_envios.cursor()
-                cursor.execute("UPDATE envios SET status = ? WHERE id = ?", (novo_status, envio["id"]))
+                marcador = "%s" if USAR_NUVEM else "?"
+                cursor.execute(f"UPDATE envios SET status = {marcador} WHERE id = {marcador}", (novo_status, envio["id"]))
                 conexao_envios.commit()
                 st.rerun()
 
@@ -930,8 +1010,10 @@ with aba_calendario:
             )
             if col_upd4.button("Salvar", key=f"botao_transf_{envio['id']}"):
                 cursor = conexao_envios.cursor()
+                marcador = "%s" if USAR_NUVEM else "?"
                 cursor.execute(
-                    "UPDATE envios SET transferencia_estoque = ? WHERE id = ?", (nova_transferencia, envio["id"])
+                    f"UPDATE envios SET transferencia_estoque = {marcador} WHERE id = {marcador}",
+                    (nova_transferencia, envio["id"]),
                 )
                 conexao_envios.commit()
                 st.rerun()
@@ -949,7 +1031,7 @@ with aba_inteligencia:
         "Sao sugestoes -- ajuste os parametros abaixo para o seu contexto real e use seu julgamento."
     )
 
-    if not os.path.exists(BANCO_VENDAS) or not os.path.exists(BANCO_ESTOQUE):
+    if not banco_disponivel(BANCO_VENDAS) or not banco_disponivel(BANCO_ESTOQUE):
         st.warning(
             f"Preciso do {BANCO_VENDAS} e do {BANCO_ESTOQUE} para calcular recomendacoes. "
             "Rode as sincronizacoes de vendas e estoque primeiro."
