@@ -26,7 +26,7 @@ import os
 import sqlite3
 import calendar
 import math
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import pandas as pd
 import streamlit as st
 
@@ -95,6 +95,11 @@ MESES_PT = {
     1: "Janeiro", 2: "Fevereiro", 3: "Marco", 4: "Abril", 5: "Maio", 6: "Junho",
     7: "Julho", 8: "Agosto", 9: "Setembro", 10: "Outubro", 11: "Novembro", 12: "Dezembro",
 }
+
+
+def agora_brasil():
+    """Hora atual do Brasil (o servidor do Streamlit Cloud roda em UTC, 3h a frente)."""
+    return datetime.now(timezone(timedelta(hours=-3))).replace(tzinfo=None)
 
 
 def formatar_moeda(valor):
@@ -283,10 +288,17 @@ else:
     """, unsafe_allow_html=True)
 st.caption("Centro de controle da operacao - versao inicial (MVP)")
 
+# ---- Login (e-mail e senha): nada abaixo disso aparece sem entrar ----
+from autenticacao import exigir_login, mostrar_sessao
+
+_email_logado = exigir_login(st)
+if _email_logado:
+    mostrar_sessao(st, _email_logado)
+
 INTERVALO_AUTOREFRESH_SEGUNDOS = 30
 if AUTOREFRESH_DISPONIVEL:
     st_autorefresh(interval=INTERVALO_AUTOREFRESH_SEGUNDOS * 1000, key="autorefresh_namilay")
-    st.caption(f"🔄 Atualizando sozinho a cada {INTERVALO_AUTOREFRESH_SEGUNDOS}s — ultima checagem: {datetime.now().strftime('%H:%M:%S')}")
+    st.caption(f"🔄 Atualizando sozinho a cada {INTERVALO_AUTOREFRESH_SEGUNDOS}s — ultima checagem: {agora_brasil().strftime('%H:%M:%S')}")
 else:
     st.caption(
         "Para essa tela se atualizar sozinha, instale: pip install streamlit-autorefresh "
@@ -529,7 +541,7 @@ with aba_vendas:
                 .mean()
             )
 
-            hoje_real = datetime.now()
+            hoje_real = agora_brasil()
             if hoje_real.month == 12:
                 mes_seguinte, ano_seguinte = 1, hoje_real.year + 1
             else:
@@ -694,7 +706,7 @@ with aba_estoque:
                     if row["status"] == "Ruptura":
                         return "Ja em ruptura"
                     if pd.notna(row["dias_restantes"]):
-                        return (datetime.now() + pd.Timedelta(days=row["dias_restantes"])).strftime("%d/%m/%Y")
+                        return (agora_brasil() + pd.Timedelta(days=row["dias_restantes"])).strftime("%d/%m/%Y")
                     return "—"
 
                 giro["previsao_ruptura"] = giro.apply(calcular_previsao, axis=1)
@@ -955,7 +967,7 @@ with aba_calendario:
         envios_df["_data"] = pd.to_datetime(envios_df["data_prevista"], format="%d/%m/%Y", errors="coerce")
         envios_filtrados = envios_df.sort_values("_data")
 
-        hoje_ts = pd.Timestamp(datetime.now().date())
+        hoje_ts = pd.Timestamp(agora_brasil().date())
         atrasados = envios_filtrados[
             (envios_filtrados["_data"] < hoje_ts) & (envios_filtrados["status"] != "Pronto")
         ]
@@ -1125,7 +1137,7 @@ with aba_inteligencia:
                     dias_para_comprar = row["dias_restantes"] - ponto_pedido_dias
                     if dias_para_comprar <= 0:
                         return "COMPRAR AGORA"
-                    return (datetime.now() + pd.Timedelta(days=dias_para_comprar)).strftime("%d/%m/%Y")
+                    return (agora_brasil() + pd.Timedelta(days=dias_para_comprar)).strftime("%d/%m/%Y")
 
                 compra["quando_comprar"] = compra.apply(quando_comprar, axis=1)
 

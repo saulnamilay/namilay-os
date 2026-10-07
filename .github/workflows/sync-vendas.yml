@@ -1,0 +1,29 @@
+name: Sincronizar vendas (Tiny -> nuvem)
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: sync-vendas
+  cancel-in-progress: false
+
+jobs:
+  sincronizar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-sync.txt
+      - name: Instalar bibliotecas
+        run: pip install -r requirements-sync.txt
+      - name: Sincronizar pedidos
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          TOKEN_TINY: ${{ secrets.TOKEN_TINY }}
+        run: python sincronizacao/sincronizar_tiny_cloud.py

@@ -1,0 +1,8 @@
+# Segredos e dados: NUNCA vao para o GitHub
+config_banco.py
+.env
+.streamlit/secrets.toml
+*.db
+*.zip
+__pycache__/
+*.pyc
